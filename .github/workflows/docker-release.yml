@@ -43,10 +43,9 @@ jobs:
           set +e
           RESP=$(curl -sS -u "x-access-token:${{ secrets.GITHUB_TOKEN }}" \
             "https://ghcr.io/token?service=ghcr.io&scope=repository:cangshui/server_alarm:push,pull")
-          echo "RAW: $RESP"
           JWT=$(echo "$RESP" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
           if [ -z "$JWT" ]; then
-            echo "::error::DIAG 用 GITHUB_TOKEN 换取 ghcr token 失败: $(echo "$RESP" | head -c 200)"
+            echo "::error::DIAG 换取 ghcr token 失败（HTTP 层）"
             exit 0
           fi
           P=$(echo "$JWT" | cut -d. -f2)
@@ -56,12 +55,14 @@ jobs:
             3) P="$P===" ;;
           esac
           echo "$P" | tr '_-' '/+' | base64 -d > /tmp/claims.json
-          echo "::error::DIAG claims=$(cat /tmp/claims.json)"
-          if grep -q '"push"' /tmp/claims.json; then
-            echo "::error::DIAG 结论=token 已拿到 push 权限，失败原因在包级访问控制（包已存在且未授权给本仓库）"
-          else
-            echo "::error::DIAG 结论=token 未拿到 push 权限，失败原因在仓库/账户的 Workflow permissions 设置"
-          fi
+          NAMES=$(python3 -c "import json;d=json.load(open('/tmp/claims.json'));a=d.get('access') or [];print(','.join(str(e.get('name')) for e in a) or '(empty)')")
+          ACTIONS=$(python3 -c "import json;d=json.load(open('/tmp/claims.json'));a=d.get('access') or [];print(','.join(sorted({x for e in a for x in (e.get('actions') or [])})) or '(empty)')")
+          echo "::error::DIAG access_names=$NAMES"
+          echo "::error::DIAG access_actions=$ACTIONS"
+          case "$ACTIONS" in
+            *push*) echo "::error::DIAG 判定=token 已获 push 权限 -> 问题在包级访问控制（包已存在且未授权给本仓库）" ;;
+            *)      echo "::error::DIAG 判定=token 未获 push 权限 -> 问题在仓库的 Workflow permissions 设置" ;;
+          esac
 
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
