@@ -38,6 +38,31 @@ jobs:
             type=semver,pattern={{major}}
             type=raw,value=latest,enable=${{ github.event.release.prerelease == false }}
 
+      - name: 诊断 - GITHUB_TOKEN 在 ghcr 的授权范围
+        run: |
+          set +e
+          RESP=$(curl -sS -u "x-access-token:${{ secrets.GITHUB_TOKEN }}" \
+            "https://ghcr.io/token?service=ghcr.io&scope=repository:cangshui/server_alarm:push,pull")
+          echo "RAW: $RESP"
+          JWT=$(echo "$RESP" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
+          if [ -z "$JWT" ]; then
+            echo "::error::DIAG 用 GITHUB_TOKEN 换取 ghcr token 失败: $(echo "$RESP" | head -c 200)"
+            exit 0
+          fi
+          P=$(echo "$JWT" | cut -d. -f2)
+          case $(( (4 - ${#P} % 4) % 4 )) in
+            1) P="$P=" ;;
+            2) P="$P==" ;;
+            3) P="$P===" ;;
+          esac
+          echo "$P" | tr '_-' '/+' | base64 -d > /tmp/claims.json
+          echo "::error::DIAG claims=$(cat /tmp/claims.json)"
+          if grep -q '"push"' /tmp/claims.json; then
+            echo "::error::DIAG 结论=token 已拿到 push 权限，失败原因在包级访问控制（包已存在且未授权给本仓库）"
+          else
+            echo "::error::DIAG 结论=token 未拿到 push 权限，失败原因在仓库/账户的 Workflow permissions 设置"
+          fi
+
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
