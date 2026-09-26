@@ -41,7 +41,7 @@ jobs:
       - name: 诊断 - GITHUB_TOKEN 在 ghcr 的授权范围
         run: |
           set +e
-          RESP=$(curl -sS -u "x-access-token:${{ secrets.GITHUB_TOKEN }}" \
+          RESP=$(curl -sS -u "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
             "https://ghcr.io/token?service=ghcr.io&scope=repository:cangshui/server_alarm:push,pull")
           JWT=$(echo "$RESP" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
           if [ -z "$JWT" ]; then
