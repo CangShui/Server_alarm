@@ -38,30 +38,6 @@ jobs:
             type=semver,pattern={{major}}
             type=raw,value=latest,enable=${{ github.event.release.prerelease == false }}
 
-      - name: 诊断 - GITHUB_TOKEN 在 ghcr 的授权范围
-        run: |
-          set +e
-          probe() {
-            local scope="$1"
-            local resp jwt payload actions names
-            resp=$(curl -sS -u "${{ github.actor }}:${{ secrets.GITHUB_TOKEN }}" \
-              "https://ghcr.io/token?service=ghcr.io&scope=repository:${scope}")
-            jwt=$(echo "$resp" | sed -n 's/.*"token":"\([^"]*\)".*/\1/p')
-            if [ -z "$jwt" ]; then echo "TOKENFAIL"; return; fi
-            payload=$(echo "$jwt" | cut -d. -f2)
-            case $(( (4 - ${#payload} % 4) % 4 )) in
-              1) payload="$payload=" ;;
-              2) payload="$payload==" ;;
-              3) payload="$payload===" ;;
-            esac
-            echo "$payload" | tr '_-' '/+' | base64 -d > /tmp/c.json
-            actions=$(python3 -c "import json;d=json.load(open('/tmp/c.json'));a=d.get('access') or [];print(','.join(sorted({x for e in a for x in (e.get('actions') or [])})) or '(empty)')")
-            names=$(python3 -c "import json;d=json.load(open('/tmp/c.json'));a=d.get('access') or [];print(','.join(str(e.get('name')) for e in a) or '(empty)')")
-            echo "actions=${actions} names=${names}"
-          }
-          echo "::error::DIAG A_target(cangshui/server_alarm:push,pull) $(probe 'cangshui/server_alarm:push,pull')"
-          echo "::error::DIAG B_control(cangshui/vpn_alarm:pull 已知公开包) $(probe 'cangshui/vpn_alarm:pull')"
-
       - name: Build and push Docker image
         uses: docker/build-push-action@v6
         with:
