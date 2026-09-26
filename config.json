@@ -1,0 +1,72 @@
+{
+  "servers": [
+    {
+      "command": "",
+      "enabled": false,
+      "host": "",
+      "name": "示例服务器 (IKEv2)",
+      "password": "",
+      "port": 22,
+      "ssh_key_passphrase": "",
+      "ssh_key_path": "",
+      "type": "ikev2",
+      "username": ""
+    },
+    {
+      "command": "",
+      "enabled": false,
+      "host": "",
+      "name": "示例服务器 (OpenVPN)",
+      "password": "",
+      "port": 22,
+      "ssh_key_passphrase": "",
+      "ssh_key_path": "",
+      "type": "openvpn",
+      "username": ""
+    },
+    {
+      "command": "who -u 2>/dev/null; if [ -r /var/log/auth.log ]; then tail -n 2000 /var/log/auth.log | grep -a sshd | tail -n 30; elif [ -r /var/log/secure ]; then tail -n 2000 /var/log/secure | grep -a sshd | tail -n 30; else journalctl -u ssh -u sshd -n 30 --no-pager -o short-iso 2>/dev/null; fi",
+      "enabled": false,
+      "host": "",
+      "name": "示例服务器 (Linux SSH登录)",
+      "password": "",
+      "port": 22,
+      "ssh_key_passphrase": "",
+      "ssh_key_path": "",
+      "type": "ssh_login",
+      "username": "root"
+    }
+  ],
+  "scan_interval": 15,
+  "connection_alert_window": 30,
+  "status_refresh_interval": 5,
+  "geo_file_path": "GeoLite2-City.mmdb",
+  "scan_history_retention": 10000,
+  "event_history_retention": 5000,
+  "trusted_cities": [
+    "北京"
+  ],
+  "access_control_enabled": false,
+  "allowed_ips": [
+    "127.0.0.1"
+  ],
+  "trust_proxy": false,
+  "trusted_proxies": [],
+  "emergency_repeat_interval": 300,
+  "notifications": {
+    "telegram": {
+      "enabled": false,
+      "token": "",
+      "chat_id": ""
+    },
+    "webhook": {
+      "enabled": false,
+      "url": "",
+      "content_type": "application/json",
+      "headers": {
+        "x-webhook-secret": ""
+      },
+      "body_template": "{\"title\": \"Server-Monitor\", \"msg\": \"{{message}}\"}"
+    }
+  }
+}

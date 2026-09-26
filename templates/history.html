@@ -1,0 +1,197 @@
+{% extends "base.html" %}
+{% block title %}事件日志{% endblock %}
+{% block head %}
+<style>
+.loading-text { text-align:center; padding:36px; color:var(--text-muted); font-size:13.5px; }
+</style>
+{% endblock %}
+{% block content %}
+
+<div class="section">
+    <h2>事件日志</h2>
+    <p style="font-size:13px; color:var(--text-muted); margin-bottom:16px;">
+        这里只保留告警、提示及其原始日志快照；周期扫描结果用于当前状态计算，不再单独展示。
+    </p>
+    <div id="events-table-container" class="loading-text">正在加载事件日志...</div>
+    <div id="events-pagination" class="pagination"></div>
+</div>
+
+<div id="snapshot-modal" class="modal-overlay" hidden>
+    <div class="modal-card" role="dialog" aria-modal="true" aria-labelledby="snapshot-modal-title">
+        <div class="modal-header">
+            <h3 id="snapshot-modal-title">
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="margin-right:6px; vertical-align:-2px;"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/><line x1="16" y1="13" x2="8" y2="13"/><line x1="16" y1="17" x2="8" y2="17"/><polyline points="10 9 9 9 8 9"/></svg>
+                <span>事件原始日志</span>
+            </h3>
+            <div style="display:flex; align-items:center; gap:8px;">
+                <button type="button" class="btn-view-log" onclick="copySnapshotLog(this)" id="btn-copy-log" title="复制日志到剪贴板">
+                    <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"/><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"/></svg>
+                    <span>复制日志</span>
+                </button>
+                <button type="button" class="modal-close" onclick="closeSnapshotModal()" aria-label="关闭">&times;</button>
+            </div>
+        </div>
+        <div id="snapshot-modal-meta" class="modal-meta"></div>
+        <pre id="snapshot-modal-body" class="snapshot-log">加载中...</pre>
+    </div>
+</div>
+
+<script>
+var eventState = { page: 1, page_size: 50, total: 0 };
+
+function makeTraceId() {
+    return 'web-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
+function clientAudit(traceId, action, result, detail) {
+    fetch('/api/client-log', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json', 'X-Trace-ID':traceId},
+        body: JSON.stringify({page:'/history', action:action, result:result, detail:detail || '', message:'事件日志页面操作审计'})
+    }).catch(function() {});
+}
+
+function loadEvents() {
+    var traceId = makeTraceId();
+    var container = document.getElementById('events-table-container');
+    container.innerHTML = '<div class="loading-text">正在加载事件日志...</div>';
+    renderPagination(true);
+    clientAudit(traceId, '加载事件日志', '开始', '页码=' + eventState.page + ',每页=' + eventState.page_size);
+
+    var query = '/api/events?page=' + eventState.page + '&page_size=' + eventState.page_size;
+    fetch(query, {headers:{'X-Trace-ID':traceId}})
+        .then(function(r) { return r.json().then(function(data) { return {ok:r.ok, data:data}; }); })
+        .then(function(res) {
+            if (!res.ok || !res.data.ok) throw new Error(res.data.error || '请求失败');
+            eventState.total = res.data.total;
+            eventState.page = res.data.page;
+            renderEvents(res.data.items);
+            renderPagination(false);
+            clientAudit(traceId, '加载事件日志', '成功', '返回=' + res.data.items.length + ',总数=' + res.data.total);
+        })
+        .catch(function(e) {
+            container.innerHTML = '<div class="card" style="text-align:center;color:var(--status-danger-text);padding:30px;">加载失败: ' + esc(e.message) + '</div>';
+            renderPagination(false);
+            clientAudit(traceId, '加载事件日志', '失败', e.message);
+        });
+}
+
+function renderEvents(items) {
+    var container = document.getElementById('events-table-container');
+    if (!items || items.length === 0) {
+        container.innerHTML = '<div class="card" style="text-align:center;color:var(--text-muted);padding:40px 20px;"><p style="font-size:14px;">暂无事件记录</p></div>';
+        return;
+    }
+    var html = '<div class="table-responsive"><table class="data-table">';
+    html += '<thead><tr><th>ID</th><th>时间</th><th>等级</th><th>类型</th><th>服务器</th><th>详情</th><th>已通知</th><th>日志记录</th></tr></thead><tbody>';
+    items.forEach(function(e) {
+        html += '<tr>';
+        html += '<td><code>#' + e.id + '</code></td>';
+        html += '<td style="white-space:nowrap;">' + esc(e.event_time) + '</td>';
+        html += '<td>' + severityBadge(e.severity) + '</td>';
+        html += '<td><span class="event-type">' + eventTypeLabel(e.event_type) + '</span></td>';
+        html += '<td><strong>' + esc(e.server_name) + '</strong></td>';
+        html += '<td style="max-width:320px; line-height:1.5;">' + formatEventDetail(e.event_type, e.detail, e.event_time) + '</td>';
+        html += '<td>' + (e.notified ? '<span style="color:var(--status-success); font-weight:600;">是</span>' : '<span style="color:var(--text-subtle);">否</span>') + '</td>';
+        html += e.snapshot_file
+            ? '<td><button type="button" class="btn-view-log" onclick="viewEventSnapshot(' + e.id + ')"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><polyline points="14 2 14 8 20 8"/></svg><span>查看日志</span></button></td>'
+            : '<td class="muted-text">无快照</td>';
+        html += '</tr>';
+    });
+    html += '</tbody></table></div>';
+    container.innerHTML = html;
+}
+
+function renderPagination(loading) {
+    var box = document.getElementById('events-pagination');
+    if (loading) {
+        box.innerHTML = '<span class="loading-text" style="padding:6px 0;">加载中...</span>';
+        return;
+    }
+    if (eventState.total === 0) {
+        box.innerHTML = '<span class="page-info" style="color:var(--text-muted);">暂无记录</span>';
+        return;
+    }
+    var pages = Math.max(1, Math.ceil(eventState.total / eventState.page_size));
+    var p = eventState.page;
+    var html = '<span class="page-info">共 <strong>' + eventState.total + '</strong> 条，第 <strong>' + p + ' / ' + pages + '</strong> 页</span> ';
+    html += '<button ' + (p <= 1 ? 'disabled' : '') + ' onclick="goPage(1)" type="button">首页</button>';
+    html += '<button ' + (p <= 1 ? 'disabled' : '') + ' onclick="goPage(' + (p-1) + ')" type="button">上一页</button>';
+    html += '<button ' + (p >= pages ? 'disabled' : '') + ' onclick="goPage(' + (p+1) + ')" type="button">下一页</button>';
+    html += '<button ' + (p >= pages ? 'disabled' : '') + ' onclick="goPage(' + pages + ')" type="button">末页</button>';
+    html += '<select onchange="changePageSize(this.value)" aria-label="每页显示条数">';
+    [20,50,100,200].forEach(function(n) { html += '<option value="' + n + '"' + (n === eventState.page_size ? ' selected' : '') + '>每页 ' + n + ' 条</option>'; });
+    html += '</select>';
+    box.innerHTML = html;
+}
+
+function goPage(page) {
+    var pages = Math.max(1, Math.ceil(eventState.total / eventState.page_size));
+    eventState.page = Math.max(1, Math.min(pages, page));
+    loadEvents();
+}
+function changePageSize(size) {
+    eventState.page_size = parseInt(size) || 50;
+    eventState.page = 1;
+    loadEvents();
+}
+function severityBadge(severity) {
+    var value = severity || '重要';
+    var cls = value === '紧急' ? 'severity-emergency' : (value === '提示' ? 'severity-info' : 'severity-important');
+    return '<span class="severity-badge ' + cls + '">' + esc(value) + '</span>';
+}
+function eventTypeLabel(eventType) {
+    var map = {
+        'new_client_alert':'客户端上线', 'connection_request':'连接请求',
+        'ssh_login_success':'SSH登录成功', 'ssh_login_failed':'SSH登录失败',
+        'ssh_login_excluded':'SSH登录（已排除）', '服务不可达':'服务不可达'
+    };
+    return map[eventType] || esc(eventType);
+}
+function dedupeLocationGroup(text) {
+    return text ? text.replace(/（([^（）]*?)）（\1）/g, '（$1）') : text;
+}
+function formatEventDetail(eventType, detail) {
+    if (detail && detail.indexOf('|||') !== -1) detail = detail.split('|||')[0] || '';
+    return dedupeLocationGroup(esc(detail));
+}
+function esc(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function viewEventSnapshot(eventId) {
+    var traceId = makeTraceId();
+    var overlay = document.getElementById('snapshot-modal');
+    var meta = document.getElementById('snapshot-modal-meta');
+    var body = document.getElementById('snapshot-modal-body');
+    overlay.hidden = false; meta.textContent = '事件 #' + eventId; body.textContent = '加载中...';
+    clientAudit(traceId, '查看事件原始日志', '开始', '事件ID=' + eventId);
+    fetch('/api/events/' + eventId + '/snapshot', {headers:{'X-Trace-ID':traceId}})
+        .then(function(r) { return r.json().then(function(data) { return {ok:r.ok,data:data}; }); })
+        .then(function(res) {
+            if (!res.ok || !res.data.ok) throw new Error((res.data && res.data.error) || '读取失败');
+            meta.innerHTML = '<span>事件 <code>#' + res.data.event_id + '</code> &nbsp;·&nbsp; ' + esc(res.data.event_time || '') + ' &nbsp;·&nbsp; <strong>' + esc(res.data.server_name || '') + '</strong></span><span><code>' + esc(res.data.filename || '') + '</code></span>';
+            body.textContent = res.data.content || '(空日志)';
+            clientAudit(traceId, '查看事件原始日志', '成功', '事件ID=' + eventId);
+        })
+        .catch(function(e) { body.textContent = '加载失败: ' + e.message; clientAudit(traceId, '查看事件原始日志', '失败', e.message); });
+}
+
+function copySnapshotLog(btn) {
+    var body = document.getElementById('snapshot-modal-body');
+    if (!body || !body.textContent) return;
+    navigator.clipboard.writeText(body.textContent).then(function() {
+        var orig = btn.innerHTML;
+        btn.innerHTML = '<span>已复制!</span>';
+        setTimeout(function() { btn.innerHTML = orig; }, 1800);
+    }).catch(function() {
+        alert('复制失败，请手动选择复制');
+    });
+}
+
+function closeSnapshotModal() { document.getElementById('snapshot-modal').hidden = true; }
+document.getElementById('snapshot-modal').addEventListener('click', function(e) { if (e.target === this) closeSnapshotModal(); });
+document.addEventListener('keydown', function(e) { if (e.key === 'Escape') closeSnapshotModal(); });
+loadEvents();
+</script>
+{% endblock %}

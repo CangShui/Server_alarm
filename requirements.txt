@@ -1,0 +1,5 @@
+flask>=2.0.0
+paramiko>=3.0.0
+apscheduler>=3.10.0
+requests>=2.28.0
+maxminddb>=2.0.0

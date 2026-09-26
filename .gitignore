@@ -1,0 +1,36 @@
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Database (auto-created on first run)
+data/
+vpn_alarm.db
+
+# Logs (auto-created on first run)
+stdout.log
+stderr.log
+logs/
+
+# Dev/test scripts (stripped from delivery)
+_test_*.py
+_trace_*.py
+_verify_*.py
+test_*.py
+
+# Docker
+.dockerignore
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# GeoIP database
+# GeoLite2-City.mmdb（约 63MB）随仓库一起分发，因此不在此忽略（GeoLite2 EULA 见 README）。
+# 注意：.dockerignore 里仍然排除它，避免进入 Docker 构建上下文与镜像。
+
+# OS
+Thumbs.db
+.DS_Store

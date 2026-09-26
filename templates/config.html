@@ -1,0 +1,670 @@
+{% extends "base.html" %}
+{% block title %}系统配置{% endblock %}
+{% block content %}
+
+<div class="section">
+    <h2>系统配置</h2>
+    <p style="font-size:13px; color:var(--text-muted); margin-bottom:16px;">修改配置后点击保存，所有字段按真实值明文保存。</p>
+
+    <form id="config-form">
+        <!-- 扫描设置 -->
+        <div class="card">
+            <h3>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg>
+                <span>扫描设置</span>
+            </h3>
+            <div class="form-row">
+                <label>扫描间隔 (秒):</label>
+                <input type="number" name="scan_interval" value="{{ config.scan_interval }}" min="10" max="3600" style="width:120px;">
+                <span style="font-size:12px; color:var(--text-muted);">后台周期性扫描客户端状态的间隔</span>
+            </div>
+            <div class="form-row">
+                <label>告警窗口 (秒):</label>
+                <input type="number" name="connection_alert_window" value="{{ config.connection_alert_window }}" min="1" max="86400" style="width:120px;">
+                <span style="font-size:12px; color:var(--text-muted);">仅对最近 N 秒内新连接的客户端触发告警</span>
+            </div>
+            <div class="form-row">
+                <label>状态刷新间隔:</label>
+                <input type="number" name="status_refresh_interval" value="{{ config.status_refresh_interval }}" min="3" max="300" style="width:120px;">
+                <span style="font-size:12px; color:var(--text-muted);">秒；在线状态页面自动轮询刷新频率</span>
+            </div>
+            <div class="form-row">
+                <label>事件保留条数:</label>
+                <input type="number" name="event_history_retention" value="{{ config.event_history_retention }}" min="100" max="1000000" style="width:150px;">
+                <span style="font-size:12px; color:var(--text-muted);">超出上限自动删除最旧的事件日志</span>
+            </div>
+            <div class="form-row">
+                <label>日志保留天数:</label>
+                <input type="number" name="log_retention_days" value="{{ config.log_retention_days }}" min="1" max="365" style="width:120px;">
+                <span style="font-size:12px; color:var(--text-muted);">超过此天数的旧归档日志文件自动删除；当前活跃日志不受影响</span>
+            </div>
+        </div>
+
+        <!-- 访问控制 -->
+        <div class="card">
+            <h3>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2" ry="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+                <span>访问控制（IP 白名单）</span>
+            </h3>
+            <p style="font-size:12.5px; color:var(--text-muted); margin:0 0 12px; line-height:1.7;">
+                只有白名单内的 IP 才能访问本系统，其余请求一律返回 403 并记录日志。<br>
+                支持单个 IP（<code>192.168.1.10</code>）与网段（<code>192.168.1.0/24</code>、<code>10.8.0.0/24</code>），
+                也接受 <code>192.168.1.1/24</code> 这种写法（会自动收敛为 <code>192.168.1.0/24</code>）。
+                <strong style="color:var(--status-danger-text);">127.0.0.1 为内置规则，不可删除。</strong>
+                请勿把当前管理 IP 排除，否则将无法再打开本页面（需在服务器上直接编辑 config.json 恢复）。
+            </p>
+            <div class="form-row" style="margin-bottom:12px;">
+                <label style="font-weight:600;">启用访问控制:</label>
+                <label class="switch-wrapper">
+                    <span class="switch">
+                        <input type="checkbox" id="ac-enabled" name="access_control_enabled"
+                               {% if config.access_control_enabled %}checked{% endif %}
+                               onchange="toggleAccessControl()">
+                        <span class="slider"></span>
+                    </span>
+                    <span style="font-size:12.5px; color:var(--text-muted);">
+                        默认<strong>不开启</strong>；关闭时下面的白名单不生效，任何 IP 都可正常访问
+                    </span>
+                </label>
+            </div>
+            <div id="allowlist-container" class="allowlist-box">
+                {% for item in allow_rules %}
+                <span class="allow-chip{% if item.locked %} allow-chip-locked{% endif %}" data-rule="{{ item.rule }}">
+                    <span class="allow-chip-ip">{{ item.rule }}</span>
+                    {% if item.locked %}
+                    <span class="allow-chip-lock" title="内置规则，不可删除">🔒</span>
+                    {% else %}
+                    <button type="button" class="allow-chip-del" onclick="deleteAllowRule(this)" title="删除该规则">×</button>
+                    {% endif %}
+                </span>
+                {% endfor %}
+            </div>
+            <div class="form-row" style="margin-top:12px;">
+                <input type="text" id="allow-input" placeholder="例如: 192.168.1.0/24 或 10.8.0.0/24 或 203.0.113.7"
+                       style="width:360px;" autocomplete="off"
+                       onkeydown="if(event.key==='Enter'){event.preventDefault();addAllowRule();}">
+                <button type="button" onclick="addAllowRule()" class="btn-success" style="padding:6px 16px; font-size:13px;">+ 添加规则</button>
+                <span id="allow-hint" style="font-size:12.5px;"></span>
+            </div>
+            <div class="ip-diagnose">
+                <div style="margin-bottom:4px;">
+                    <strong>当前这次访问被识别为：</strong>
+                    <code>{{ client_info.client or '未知' }}</code>
+                    <span class="ip-diagnose-sub">
+                        （TCP 直连来源 <code>{{ client_info.peer or '未知' }}</code>
+                        {% if client_info.forwarded %}，转发链 <code>{{ client_info.forwarded }}</code>{% endif %}
+                        ，取值来源 <code>{{ client_info.source or '-' }}</code>）
+                    </span>
+                </div>
+                <div class="ip-diagnose-note">
+                    局域网直连时两者一致；经 Docker 端口映射的“本机访问”通常显示为网桥网关（如 172.19.0.1）。
+                </div>
+            </div>
+            <div class="form-row" style="margin-top:12px;">
+                <label>信任反向代理:</label>
+                <label class="switch-wrapper">
+                    <span class="switch">
+                        <input type="checkbox" id="tp-enabled" name="trust_proxy"
+                               {% if config.trust_proxy %}checked{% endif %}>
+                        <span class="slider"></span>
+                    </span>
+                    <span style="font-size:12.5px; color:var(--text-muted);">
+                        默认<strong>不勾选</strong>。仅当系统前面挂了 Nginx/Traefik/WAF 等反向代理时才需要开启
+                    </span>
+                </label>
+            </div>
+            <div class="form-row">
+                <label>可信代理地址:</label>
+                <input type="text" name="trusted_proxies" value="{{ config.trusted_proxies | join(', ') }}"
+                       style="width:420px;" placeholder="例如: 127.0.0.1, 172.19.0.0/16">
+                <span style="font-size:12px; color:var(--text-muted);">
+                    逗号分隔。只有来源命中此列表的请求，才会采信 <code>X-Forwarded-For</code>（防伪造）
+                </span>
+            </div>
+        </div>
+
+        <!-- 服务器列表 -->
+        <div class="card">
+            <h3>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="2" width="20" height="8" rx="2" ry="2"/><rect x="2" y="14" width="20" height="8" rx="2" ry="2"/><line x1="6" y1="6" x2="6.01" y2="6"/><line x1="6" y1="18" x2="6.01" y2="18"/></svg>
+                <span>服务器配置</span>
+            </h3>
+            <div id="servers-container">
+                {% for srv in config.servers %}
+                <div class="server-config" data-index="{{ loop.index0 }}">
+                    <div class="server-config-header">
+                        <strong style="font-size:14px; color:var(--text-primary); display:flex; align-items:center; gap:8px;">
+                            <span style="width:8px; height:8px; border-radius:50%; background:var(--brand);"></span>
+                            <span>服务器 #<span class="server-num">{{ loop.index }}</span></span>
+                        </strong>
+                        <button type="button" onclick="deleteServer(this)" class="btn-delete-server">删除</button>
+                    </div>
+                    <div class="form-row">
+                        <label>名称:</label>
+                        <input type="text" name="server_name" value="{{ srv.name }}" style="width:220px;" placeholder="服务器标识名称">
+                    </div>
+                    <div class="form-row">
+                        <label>主机:</label>
+                        <input type="text" name="server_host" value="{{ srv.host }}" style="width:200px;" placeholder="IP 或域名">
+                        <label style="min-width:50px;">端口:</label>
+                        <input type="number" name="server_port" value="{{ srv.port }}" style="width:85px;">
+                    </div>
+                    <div class="form-row">
+                        <label>用户名:</label>
+                        <input type="text" name="server_username" value="{{ srv.username }}" style="width:160px;">
+                        <label style="min-width:50px;">密码:</label>
+                        <input type="password" name="server_password" value="{{ srv.password }}" style="width:190px;" autocomplete="off" placeholder="SSH密码(若有)">
+                    </div>
+                    <div class="form-row">
+                        <label>SSH密钥路径:</label>
+                        <input type="text" name="server_ssh_key_path" value="{{ srv.ssh_key_path }}" placeholder="例: ~/.ssh/id_rsa" style="width:260px;">
+                        <label style="min-width:65px;">密钥密码:</label>
+                        <input type="password" name="server_ssh_key_passphrase" value="{{ srv.ssh_key_passphrase }}" style="width:160px;" autocomplete="off" placeholder="密钥Passphrase">
+                    </div>
+                    <div class="form-row">
+                        <label>采集命令:</label>
+                        <input type="text" name="server_command" value="{{ srv.command }}" style="width:520px;" placeholder="为空则自动根据类型适配默认命令">
+                    </div>
+                    <div class="form-row ssh-only-field">
+                        <label>排除IP列表:</label>
+                        <input type="text" name="server_exclude_ips" value="{{ (srv.exclude_ips or []) | join(', ') }}" placeholder="可选，逗号分隔，如需忽略指定来源IP" style="width:420px;">
+                    </div>
+                    <div class="form-row ssh-only-field">
+                        <label>排除用户名:</label>
+                        <input type="text" name="server_exclude_users" value="{{ (srv.exclude_users or []) | join(', ') }}" placeholder="可选，逗号分隔，如填写监控专用账号 vpn_monitor、guest 等" style="width:420px;">
+                        <span style="font-size:12px; color:var(--text-muted);">命中规则的记录降级为「提示」：仍写入事件日志，但不发送任何通知</span>
+                    </div>
+                    <div class="form-row">
+                        <label>协议类型:</label>
+                        <select name="server_type" onchange="toggleSshOnlyFields(this)">
+                            <option value="ikev2" {% if srv.type == 'ikev2' %}selected{% endif %}>IKEv2 (ipsec statusall)</option>
+                            <option value="openvpn" {% if srv.type == 'openvpn' %}selected{% endif %}>OpenVPN (status log)</option>
+                            <option value="ssh_login" {% if srv.type == 'ssh_login' %}selected{% endif %}>Linux SSH登录 (journalctl/auth.log)</option>
+                            <option value="generic" {% if srv.type == 'generic' %}selected{% endif %}>通用</option>
+                        </select>
+                        <label style="min-width:50px; margin-left:12px;">启用:</label>
+                        <label class="switch-wrapper">
+                            <span class="switch">
+                                <input type="checkbox" name="server_enabled" {% if srv.enabled %}checked{% endif %}>
+                                <span class="slider"></span>
+                            </span>
+                        </label>
+                    </div>
+                </div>
+                {% endfor %}
+            </div>
+            <div style="margin-top:12px;">
+                <button type="button" onclick="addServer()" class="btn-add-server">
+                    <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><line x1="12" y1="5" x2="12" y2="19"/><line x1="5" y1="12" x2="19" y2="12"/></svg>
+                    <span>添加服务器</span>
+                </button>
+            </div>
+        </div>
+
+        <!-- 城市解析配置 -->
+        <div class="card">
+            <h3>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z"/><circle cx="12" cy="10" r="3"/></svg>
+                <span>城市解析配置</span>
+            </h3>
+            <div class="form-row">
+                <label>本地文件路径:</label>
+                <input type="text" name="geo_file_path" value="{{ config.geo_file_path }}" style="width:420px;" placeholder="留空使用默认 GeoLite2-City.mmdb">
+                <span style="font-size:12px; color:var(--text-muted);">支持 MaxMind .mmdb 格式，绝对路径或相对于项目目录的文件名</span>
+            </div>
+        </div>
+
+        <!-- 告警等级策略 -->
+        <div class="card alert-policy-card">
+            <h3>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.29 3.86L1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z"/><line x1="12" y1="9" x2="12" y2="13"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>
+                <span>告警等级策略</span>
+            </h3>
+            <div class="severity-policy-list">
+                <div class="severity-policy-item">
+                    <span class="severity-badge severity-info">提示</span>
+                    <span>OpenVPN 请求未分配虚拟 IP，或 SSH 认证失败（如密码错误/用户名不存在），只写入事件日志，不发送通知。</span>
+                </div>
+                <div class="severity-policy-item">
+                    <span class="severity-badge severity-important">重要</span>
+                    <span>客户端已连接/SSH登录成功，且城市可信或无法明确解析城市，只发送一次通知。</span>
+                </div>
+                <div class="severity-policy-item">
+                    <span class="severity-badge severity-emergency">紧急</span>
+                    <span>客户端已连接/SSH登录成功，且本地 GeoIP 明确解析为非信任城市，持续通知直到断开/恢复。</span>
+                </div>
+            </div>
+            <div class="form-row">
+                <label>信任城市:</label>
+                <input type="text" name="trusted_cities" value="{{ config.trusted_cities | join(', ') }}" style="width:420px;" placeholder="例如: 北京, 上海">
+                <span style="font-size:12px; color:var(--text-muted);">多个城市用逗号分隔；“北京”和“北京市”视为同一城市</span>
+            </div>
+            <div class="form-row">
+                <label>紧急重复间隔:</label>
+                <input type="number" name="emergency_repeat_interval" value="{{ config.emergency_repeat_interval }}" min="10" max="86400" style="width:120px;">
+                <span style="font-size:12px; color:var(--text-muted);">秒；紧急客户端在线期间按此间隔重复发送</span>
+            </div>
+        </div>
+
+        <!-- 通知配置 -->
+        <div class="card">
+            <h3>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13"/><polygon points="22 2 15 22 11 13 2 9 22 2"/></svg>
+                <span>Telegram 通知</span>
+            </h3>
+            <div class="form-row">
+                <label>启用:</label>
+                <label class="switch-wrapper">
+                    <span class="switch">
+                        <input type="checkbox" id="tg-enabled" name="tg_enabled" {% if config.notifications.telegram.enabled %}checked{% endif %}>
+                        <span class="slider"></span>
+                    </span>
+                </label>
+            </div>
+            <div class="form-row">
+                <label>Bot Token:</label>
+                <input type="text" name="tg_token" value="{{ config.notifications.telegram.token }}" style="width:420px;" placeholder="Telegram Bot Token">
+            </div>
+            <div class="form-row">
+                <label>Chat ID:</label>
+                <input type="text" name="tg_chat_id" value="{{ config.notifications.telegram.chat_id }}" style="width:220px;" placeholder="目标频道或群组 ID">
+            </div>
+        </div>
+
+        <div class="card">
+            <h3>
+                <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                <span>Webhook 通知</span>
+            </h3>
+            <div class="form-row">
+                <label>启用:</label>
+                <label class="switch-wrapper">
+                    <span class="switch">
+                        <input type="checkbox" id="wh-enabled" name="wh_enabled" {% if config.notifications.webhook.enabled %}checked{% endif %}>
+                        <span class="slider"></span>
+                    </span>
+                </label>
+            </div>
+            <div class="form-row">
+                <label>URL:</label>
+                <input type="text" name="wh_url" value="{{ config.notifications.webhook.url }}" style="width:450px;" placeholder="https://oapi.dingtalk.com/robot/send?...">
+            </div>
+            <div class="form-row">
+                <label>Content-Type:</label>
+                <input type="text" name="wh_content_type" value="{{ config.notifications.webhook.content_type }}" style="width:220px;">
+            </div>
+            <div class="form-row">
+                <label>Header Key:</label>
+                <input type="text" name="wh_header_key" value="{% for k in config.notifications.webhook.headers %}{{ k }}{% endfor %}" style="width:200px;" placeholder="如: X-Token">
+                <label style="min-width:85px; margin-left:8px;">Header Value:</label>
+                <input type="text" name="wh_header_value" value="{% for k, v in config.notifications.webhook.headers.items() %}{{ v }}{% endfor %}" style="width:280px;" placeholder="自定义头数值">
+            </div>
+            <div class="form-row">
+                <label>Body 模板:</label>
+                <input type="text" name="wh_body_template" value="{{ config.notifications.webhook.body_template }}" style="width:520px;">
+                <span style="font-size:12px; color:var(--text-muted);">使用 {{ '{{message}}' }} 作为消息占位符</span>
+            </div>
+        </div>
+
+        <div style="margin-top:20px; display:flex; align-items:center; gap:12px; flex-wrap:wrap;">
+            <button type="button" onclick="saveConfig()" class="btn-primary" style="padding:9px 24px; font-size:14px;">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2z"/><polyline points="17 21 17 13 7 13 7 21"/><polyline points="7 3 7 8 15 8"/></svg>
+                <span>保存配置</span>
+            </button>
+            <button type="button" onclick="testNotification()" class="btn-secondary" style="padding:9px 20px; font-size:14px;">
+                <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 8A6 6 0 0 0 6 8c0 7-3 9-3 9h18s-3-2-3-9"/><path d="M13.73 21a2 2 0 0 1-3.46 0"/></svg>
+                <span>测试通知</span>
+            </button>
+            <span id="config-hint" style="font-size:13.5px; font-weight:500;"></span>
+        </div>
+    </form>
+</div>
+
+<script>
+// ---- 动态服务器管理 ----
+function addServer() {
+    var container = document.getElementById('servers-container');
+    var count = container.querySelectorAll('.server-config').length;
+    var html = '<div class="server-config">';
+    html += '<div class="server-config-header">';
+    html += '<strong style="font-size:14px; color:var(--text-primary); display:flex; align-items:center; gap:8px;"><span style="width:8px; height:8px; border-radius:50%; background:var(--brand);"></span><span>服务器 #<span class="server-num">' + (count + 1) + '</span></span></strong>';
+    html += '<button type="button" onclick="deleteServer(this)" class="btn-delete-server">删除</button>';
+    html += '</div>';
+    html += '<div class="form-row"><label>名称:</label><input type="text" name="server_name" placeholder="例如: 生产网关 C" style="width:220px;"></div>';
+    html += '<div class="form-row"><label>主机:</label><input type="text" name="server_host" placeholder="192.168.1.100" style="width:200px;"> <label style="min-width:50px;">端口:</label><input type="number" name="server_port" value="22" style="width:85px;"></div>';
+    html += '<div class="form-row"><label>用户名:</label><input type="text" name="server_username" value="root" style="width:160px;"> <label style="min-width:50px;">密码:</label><input type="password" name="server_password" placeholder="输入密码" style="width:190px;" autocomplete="off"></div>';
+    html += '<div class="form-row"><label>SSH密钥路径:</label><input type="text" name="server_ssh_key_path" placeholder="例: ~/.ssh/id_rsa" style="width:260px;"> <label style="min-width:65px;">密钥密码:</label><input type="password" name="server_ssh_key_passphrase" placeholder="密钥密码(如有)" style="width:160px;" autocomplete="off"></div>';
+    html += '<div class="form-row"><label>采集命令:</label><input type="text" name="server_command" placeholder="命令根据类型自动适配，如 SSH 可填 who 与日志探测命令" style="width:520px;"></div>';
+    html += '<div class="form-row ssh-only-field"><label>排除IP列表:</label><input type="text" name="server_exclude_ips" placeholder="可选，逗号分隔，如需显式忽略指定IP" style="width:420px;"></div>';
+    html += '<div class="form-row ssh-only-field"><label>排除用户名:</label><input type="text" name="server_exclude_users" placeholder="可选，逗号分隔，如需显式忽略监控账号" style="width:420px;"></div>';
+    html += '<div class="form-row"><label>协议类型:</label><select name="server_type" onchange="toggleSshOnlyFields(this)"><option value="ikev2">IKEv2 (ipsec statusall)</option><option value="openvpn">OpenVPN (status log)</option><option value="ssh_login">Linux SSH登录 (journalctl/auth.log)</option><option value="generic" selected>通用</option></select> <label style="min-width:50px; margin-left:12px;">启用:</label><label class="switch-wrapper"><span class="switch"><input type="checkbox" name="server_enabled" checked><span class="slider"></span></span></label></div>';
+    html += '</div>';
+    container.insertAdjacentHTML('beforeend', html);
+    renumberServers();
+    var newCard = container.querySelector('.server-config:last-of-type');
+    if (newCard) {
+        var tSel = newCard.querySelector('select[name="server_type"]');
+        if (tSel) toggleSshOnlyFields(tSel);
+    }
+}
+
+function toggleSshOnlyFields(selectEl) {
+    var card = selectEl.closest('.server-config');
+    if (!card) return;
+    var isSsh = selectEl.value === 'ssh_login';
+    card.querySelectorAll('.ssh-only-field').forEach(function(row) {
+        row.style.display = isSsh ? '' : 'none';
+    });
+}
+
+function deleteServer(btn) {
+    var card = btn.closest('.server-config');
+    if (card) {
+        card.remove();
+        renumberServers();
+    }
+}
+
+function renumberServers() {
+    var cards = document.querySelectorAll('#servers-container .server-config');
+    cards.forEach(function(card, idx) {
+        var numSpan = card.querySelector('.server-num');
+        if (numSpan) numSpan.textContent = idx + 1;
+    });
+}
+
+// ---- 访问白名单管理 ----
+var PERMANENT_RULES = ['127.0.0.1'];
+
+function isValidIpText(ip) {
+    ip = (ip || '').trim();
+    if (!ip) return false;
+    if (ip.indexOf(':') >= 0) {
+        return /^[0-9a-fA-F:]+$/.test(ip) && ip.split(':').length >= 3;
+    }
+    var parts = ip.split('.');
+    if (parts.length !== 4) return false;
+    return parts.every(function(x) {
+        return /^\d{1,3}$/.test(x) && parseInt(x, 10) <= 255;
+    });
+}
+
+function normalizeRuleClient(text) {
+    text = (text || '').trim();
+    var parts = text.split('/');
+    if (parts.length === 1) return text;
+    var prefix = parseInt(parts[1], 10);
+    var ip = parts[0];
+    if (ip.indexOf(':') >= 0) return text;
+    var o = ip.split('.').map(function(x) { return parseInt(x, 10); });
+    var n = ((o[0] << 24) >>> 0) + (o[1] << 16) + (o[2] << 8) + o[3];
+    var mask = prefix === 0 ? 0 : (0xFFFFFFFF << (32 - prefix)) >>> 0;
+    var net = (n & mask) >>> 0;
+    return [(net >>> 24) & 255, (net >>> 16) & 255, (net >>> 8) & 255, net & 255].join('.') + '/' + prefix;
+}
+
+function isValidRule(text) {
+    text = (text || '').trim();
+    if (!text) return false;
+    var parts = text.split('/');
+    if (parts.length > 2) return false;
+    if (!isValidIpText(parts[0])) return false;
+    if (parts.length === 2) {
+        if (!/^\d+$/.test(parts[1])) return false;
+        var maxPrefix = parts[0].indexOf(':') >= 0 ? 128 : 32;
+        var prefix = parseInt(parts[1], 10);
+        if (isNaN(prefix) || prefix < 0 || prefix > maxPrefix) return false;
+    }
+    return true;
+}
+
+function _allowChips() {
+    return Array.prototype.slice.call(document.querySelectorAll('#allowlist-container .allow-chip'));
+}
+
+function _allowHint(msg, ok) {
+    var hint = document.getElementById('allow-hint');
+    if (!hint) return;
+    hint.textContent = msg || '';
+    hint.style.color = ok ? 'var(--status-success-text)' : 'var(--status-danger-text)';
+}
+
+function _makeAllowChip(rule, locked) {
+    var span = document.createElement('span');
+    span.className = 'allow-chip' + (locked ? ' allow-chip-locked' : '');
+    span.setAttribute('data-rule', rule);
+    var ipSpan = document.createElement('span');
+    ipSpan.className = 'allow-chip-ip';
+    ipSpan.textContent = rule;
+    span.appendChild(ipSpan);
+    if (locked) {
+        var lockSpan = document.createElement('span');
+        lockSpan.className = 'allow-chip-lock';
+        lockSpan.title = '内置规则，不可删除';
+        lockSpan.textContent = '🔒';
+        span.appendChild(lockSpan);
+    } else {
+        var btn = document.createElement('button');
+        btn.type = 'button';
+        btn.className = 'allow-chip-del';
+        btn.title = '删除该规则';
+        btn.textContent = '×';
+        btn.onclick = function() { deleteAllowRule(btn); };
+        span.appendChild(btn);
+    }
+    return span;
+}
+
+function addAllowRule(silent) {
+    var input = document.getElementById('allow-input');
+    if (!input) return true;
+    var raw = input.value.trim();
+    if (!raw) {
+        if (!silent) _allowHint('请先输入 IP 或网段', false);
+        return true;
+    }
+    if (!isValidRule(raw)) {
+        if (!silent) _allowHint('格式不正确，示例: 10.8.0.0/24 或 192.168.1.10', false);
+        return false;
+    }
+    var rule = normalizeRuleClient(raw);
+    var container = document.getElementById('allowlist-container');
+    var exists = _allowChips().some(function(c) {
+        return normalizeRuleClient(c.getAttribute('data-rule')) === rule;
+    });
+    if (exists) {
+        if (!silent) _allowHint('该规则已存在: ' + rule, false);
+        return true;
+    }
+    container.appendChild(_makeAllowChip(rule, PERMANENT_RULES.indexOf(rule) >= 0));
+    input.value = '';
+    _allowHint('已添加: ' + rule + '（点击“保存配置”后生效）', true);
+    return true;
+}
+
+function deleteAllowRule(btn) {
+    var chip = btn.closest('.allow-chip');
+    if (!chip) return;
+    if (chip.classList.contains('allow-chip-locked')) {
+        _allowHint('内置规则 127.0.0.1 不可删除', false);
+        return;
+    }
+    chip.remove();
+    _allowHint('已删除，点击“保存配置”后生效', true);
+}
+
+function collectAllowRules() {
+    var input = document.getElementById('allow-input');
+    if (input && input.value.trim()) {
+        addAllowRule(true);
+    }
+    var rules = [];
+    _allowChips().forEach(function(c) {
+        var rule = (c.getAttribute('data-rule') || '').trim();
+        if (rule && rules.indexOf(rule) < 0) rules.push(rule);
+    });
+    if (rules.indexOf('127.0.0.1') < 0) rules.unshift('127.0.0.1');
+    return rules;
+}
+
+function toggleAccessControl() {
+    var enabledEl = document.getElementById('ac-enabled');
+    var box = document.getElementById('allowlist-container');
+    if (!enabledEl || !box) return;
+    var enabled = enabledEl.checked;
+    box.style.opacity = enabled ? '1' : '0.45';
+    box.style.background = enabled ? 'var(--bg-subtle)' : 'var(--bg-muted)';
+    var hint = document.getElementById('allow-hint');
+    if (hint) {
+        hint.textContent = enabled ? '' : '未启用访问控制：白名单暂不生效，任何 IP 均可访问';
+        hint.style.color = 'var(--text-muted)';
+    }
+}
+
+function saveConfig() {
+    var hint = document.getElementById('config-hint');
+    hint.textContent = '保存中...';
+    hint.style.color = 'var(--text-muted)';
+
+    try {
+        var config = {
+            scan_interval: parseInt(document.querySelector('input[name="scan_interval"]').value) || 60,
+            connection_alert_window: parseInt(document.querySelector('input[name="connection_alert_window"]').value) || 300,
+            status_refresh_interval: parseInt(document.querySelector('input[name="status_refresh_interval"]').value) || 5,
+            event_history_retention: parseInt(document.querySelector('input[name="event_history_retention"]').value) || 5000,
+            log_retention_days: parseInt(document.querySelector('input[name="log_retention_days"]').value) || 30,
+            geo_file_path: document.querySelector('input[name="geo_file_path"]').value.trim(),
+            trusted_cities: document.querySelector('input[name="trusted_cities"]').value
+                .split(/[,，]/).map(function(v) { return v.trim(); }).filter(Boolean),
+            emergency_repeat_interval: parseInt(document.querySelector('input[name="emergency_repeat_interval"]').value) || 300,
+            access_control_enabled: document.getElementById('ac-enabled').checked,
+            allowed_ips: collectAllowRules(),
+            trust_proxy: document.getElementById('tp-enabled').checked,
+            trusted_proxies: document.querySelector('input[name="trusted_proxies"]').value
+                .split(/[,，]/).map(function(v) { return v.trim(); }).filter(Boolean),
+            servers: [],
+            notifications: {
+                telegram: {
+                    enabled: document.getElementById('tg-enabled').checked,
+                    token: document.querySelector('input[name="tg_token"]').value,
+                    chat_id: document.querySelector('input[name="tg_chat_id"]').value
+                },
+                webhook: {
+                    enabled: document.getElementById('wh-enabled').checked,
+                    url: document.querySelector('input[name="wh_url"]').value,
+                    content_type: document.querySelector('input[name="wh_content_type"]').value,
+                    headers: {},
+                    body_template: document.querySelector('input[name="wh_body_template"]').value
+                }
+            }
+        };
+
+        var hk = document.querySelector('input[name="wh_header_key"]').value.trim();
+        var hv = document.querySelector('input[name="wh_header_value"]').value.trim();
+        if (hk && hv) {
+            config.notifications.webhook.headers[hk] = hv;
+        }
+
+        var serverCards = document.querySelectorAll('#servers-container .server-config');
+        serverCards.forEach(function(card) {
+            var nameEl = card.querySelector('input[name="server_name"]');
+            var hostEl = card.querySelector('input[name="server_host"]');
+            var portEl = card.querySelector('input[name="server_port"]');
+            var userEl = card.querySelector('input[name="server_username"]');
+            var passEl = card.querySelector('input[name="server_password"]');
+            var keyPathEl = card.querySelector('input[name="server_ssh_key_path"]');
+            var keyPassEl = card.querySelector('input[name="server_ssh_key_passphrase"]');
+            var cmdEl = card.querySelector('input[name="server_command"]');
+            var excEl = card.querySelector('input[name="server_exclude_ips"]');
+            var excUserEl = card.querySelector('input[name="server_exclude_users"]');
+            var typeEl = card.querySelector('select[name="server_type"]');
+            var enEl = card.querySelector('input[name="server_enabled"]');
+
+            if (nameEl && hostEl) {
+                config.servers.push({
+                    name: nameEl.value,
+                    host: hostEl.value,
+                    port: parseInt(portEl ? portEl.value : 22) || 22,
+                    username: userEl ? userEl.value : 'root',
+                    password: passEl ? passEl.value : '',
+                    ssh_key_path: keyPathEl ? keyPathEl.value.trim() : '',
+                    ssh_key_passphrase: keyPassEl ? keyPassEl.value : '',
+                    command: cmdEl ? cmdEl.value : '',
+                    exclude_ips: excEl ? excEl.value.split(/[,，]/).map(function(v){ return v.trim(); }).filter(Boolean) : [],
+                    exclude_users: excUserEl ? excUserEl.value.split(/[,，]/).map(function(v){ return v.trim(); }).filter(Boolean) : [],
+                    type: typeEl ? typeEl.value : 'generic',
+                    enabled: enEl ? enEl.checked : true
+                });
+            }
+        });
+
+        fetch('/api/config', {
+            method: 'POST',
+            headers: {'Content-Type': 'application/json'},
+            body: JSON.stringify(config)
+        })
+        .then(function(r) {
+            if (!r.ok) {
+                return r.text().then(function(txt) {
+                    throw new Error('HTTP ' + r.status + ': ' + (txt || r.statusText).substring(0, 200));
+                });
+            }
+            return r.json();
+        })
+        .then(function(data) {
+            if (data.ok) {
+                hint.textContent = '保存成功！配置已更新。';
+                hint.style.color = 'var(--status-success)';
+                setTimeout(function(){ location.reload(); }, 1200);
+            } else {
+                hint.textContent = '保存失败: ' + (data.error || '未知错误');
+                hint.style.color = 'var(--status-danger-text)';
+            }
+        })
+        .catch(function(e) {
+            hint.textContent = '请求失败: ' + e.message;
+            hint.style.color = 'var(--status-danger-text)';
+            console.error('SaveConfig error:', e);
+        });
+    } catch (e) {
+        hint.textContent = '构建请求失败: ' + e.message;
+        hint.style.color = 'var(--status-danger-text)';
+        console.error('SaveConfig build error:', e);
+    }
+}
+
+function testNotification() {
+    var hint = document.getElementById('config-hint');
+    hint.textContent = '正在发送测试通知...';
+    hint.style.color = 'var(--text-muted)';
+
+    fetch('/api/test-notification', {method: 'POST'})
+        .then(r => r.json())
+        .then(data => {
+            if (data.ok) {
+                var parts = [];
+                for (var k in data.results) {
+                    var r = data.results[k];
+                    parts.push(k + ': ' + (r.ok ? '成功' : '失败') + ' - ' + r.message);
+                }
+                hint.textContent = parts.join(' | ');
+                hint.style.color = 'var(--text-primary)';
+            } else {
+                hint.textContent = '请求失败';
+                hint.style.color = 'var(--status-danger-text)';
+            }
+        })
+        .catch(e => {
+            hint.textContent = '请求失败: ' + e.message;
+            hint.style.color = 'var(--status-danger-text)';
+        });
+}
+
+toggleAccessControl();
+
+document.querySelectorAll('.server-config select[name="server_type"]').forEach(function(el) {
+    toggleSshOnlyFields(el);
+});
+</script>
+
+{% endblock %}

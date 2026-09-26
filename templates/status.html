@@ -1,0 +1,489 @@
+{% extends "base.html" %}
+{% block title %}当前状态{% endblock %}
+{% block content %}
+
+<div class="section">
+    <h2>告警与扫描暂停</h2>
+    <div class="card pause-card" id="pause-card">
+        <div class="pause-row" id="pause-idle-row">
+            <span class="pause-label">暂停时长:</span>
+            <select id="pause-duration" aria-label="选择暂停时长">
+                <option value="5m">5 分钟</option>
+                <option value="30m" selected>30 分钟</option>
+                <option value="1h">1 小时</option>
+                <option value="5h">5 小时</option>
+                <option value="24h">24 小时</option>
+            </select>
+            <button id="pause-btn" type="button" onclick="pauseAlertsAndScan()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg>
+                <span>暂停所有告警和扫描</span>
+            </button>
+            <span id="pause-hint" class="pause-hint"></span>
+        </div>
+
+        <div class="pause-row" id="pause-active-row" hidden>
+            <span class="status-badge badge-warn">已暂停</span>
+            <span class="pause-remaining">剩余 <strong id="pause-remaining-text">--:--:--</strong></span>
+            <span class="pause-until">将于 <strong id="pause-until-text">-</strong> 自动恢复</span>
+            <button id="resume-btn" type="button" class="btn-resume" onclick="resumeAlertsAndScan()">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg>
+                <span>立即恢复</span>
+            </button>
+            <span id="resume-hint" class="pause-hint"></span>
+        </div>
+
+        <p class="pause-note">
+            暂停期间：<strong>不执行任何采集</strong>（定时与手动均跳过），<strong>不推送任何告警</strong>
+            （Telegram / Webhook 全部抑制），到期自动恢复；重启容器不会丢失暂停状态。
+        </p>
+    </div>
+</div>
+
+<div class="section">
+    <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:12px; flex-wrap:wrap; gap:10px;">
+        <h2>服务器在线状态 <span style="font-size:12px; font-weight:normal; color:var(--text-muted); margin-left:6px;" id="refresh-indicator"></span></h2>
+        <div style="display:flex; align-items:center; gap:10px;">
+            <button onclick="manualScan()" id="scan-btn" class="btn-primary" type="button">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg>
+                <span>立即采集</span>
+            </button>
+            <span id="scan-hint" style="color:var(--text-muted); font-size:13px;"></span>
+        </div>
+    </div>
+
+    <div id="server-status-area">
+        <div class="card" style="text-align: center; color: var(--text-muted); padding: 36px 20px;">
+            <p>正在加载服务器状态...</p>
+        </div>
+    </div>
+</div>
+
+<div class="section">
+    <h2>城市解析器状态</h2>
+    <div id="resolver-status-area">
+        <div class="card" style="text-align: center; color: var(--text-muted); padding: 24px;">
+            <p>正在加载解析器信息...</p>
+        </div>
+    </div>
+</div>
+
+<div class="section">
+    <h2>数据库统计</h2>
+    <div id="db-stats-area">
+        <div class="card" style="text-align: center; color: var(--text-muted); padding: 24px;">
+            <p>正在加载统计数据...</p>
+        </div>
+    </div>
+</div>
+
+<script>
+var AUTO_REFRESH_SEC = {{ status_refresh_interval or 5 }};
+var refreshTimer = null;
+
+// ---- 告警与扫描暂停 ----
+var pauseState = {
+    paused: false,
+    until: null,
+    remaining_seconds: 0,
+    duration_label: ''
+};
+var pauseCountdownTimer = null;
+var scanInProgress = false;
+
+function makeTraceId() {
+    return 'web-' + Date.now().toString(36) + '-' + Math.random().toString(36).slice(2, 10);
+}
+
+// 前端审计日志必须落盘（logs/audit-dev.log），不能只留在浏览器控制台
+function clientAudit(traceId, action, result, detail) {
+    fetch('/api/client-log', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json', 'X-Trace-ID':traceId},
+        body: JSON.stringify({
+            page: '/status',
+            action: action,
+            result: result,
+            detail: detail || '',
+            message: '首页告警与扫描暂停操作审计'
+        })
+    }).catch(function() {});
+}
+
+function formatCountdown(seconds) {
+    seconds = Math.max(0, Math.floor(seconds));
+    var h = Math.floor(seconds / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    var s = seconds % 60;
+    var pad = function(n) { return (n < 10 ? '0' : '') + n; };
+    return pad(h) + ':' + pad(m) + ':' + pad(s);
+}
+
+function renderPause(pause) {
+    if (!pause) return;
+    var wasPaused = pauseState.paused;
+    pauseState = {
+        paused: !!pause.paused,
+        until: pause.until || null,
+        remaining_seconds: Number(pause.remaining_seconds || 0),
+        duration_label: pause.duration_label || ''
+    };
+
+    var idleRow = document.getElementById('pause-idle-row');
+    var activeRow = document.getElementById('pause-active-row');
+    if (pauseState.paused) {
+        idleRow.hidden = true;
+        activeRow.hidden = false;
+        document.getElementById('pause-until-text').textContent = pauseState.until || '-';
+        document.getElementById('pause-remaining-text').textContent =
+            formatCountdown(pauseState.remaining_seconds);
+        startPauseCountdown();
+    } else {
+        idleRow.hidden = false;
+        activeRow.hidden = true;
+        stopPauseCountdown();
+        if (wasPaused) {
+            var hint = document.getElementById('pause-hint');
+            hint.textContent = '暂停已结束，采集与告警已自动恢复。';
+            hint.style.color = 'var(--status-success)';
+            setTimeout(function(){ hint.textContent = ''; }, 5000);
+        }
+    }
+
+    var scanBtn = document.getElementById('scan-btn');
+    if (scanBtn) {
+        scanBtn.disabled = pauseState.paused || scanInProgress;
+        scanBtn.title = pauseState.paused ? '告警与扫描已暂停，请先「立即恢复」' : '';
+    }
+}
+
+function startPauseCountdown() {
+    if (pauseCountdownTimer) return;
+    pauseCountdownTimer = setInterval(function() {
+        if (pauseState.remaining_seconds > 0) {
+            pauseState.remaining_seconds -= 1;
+            document.getElementById('pause-remaining-text').textContent =
+                formatCountdown(pauseState.remaining_seconds);
+        }
+        if (pauseState.remaining_seconds <= 0) {
+            stopPauseCountdown();
+            loadStatus();
+        }
+    }, 1000);
+}
+
+function stopPauseCountdown() {
+    if (pauseCountdownTimer) {
+        clearInterval(pauseCountdownTimer);
+        pauseCountdownTimer = null;
+    }
+}
+
+function pauseAlertsAndScan() {
+    var traceId = makeTraceId();
+    var select = document.getElementById('pause-duration');
+    var duration = select ? select.value : '';
+    var btn = document.getElementById('pause-btn');
+    var hint = document.getElementById('pause-hint');
+    var label = select && select.options[select.selectedIndex] ? select.options[select.selectedIndex].text : duration;
+
+    clientAudit(traceId, '点击暂停按钮', '开始',
+        '选择时长=' + duration + '（' + label + '），准备调用 POST /api/pause');
+
+    btn.disabled = true;
+    btn.innerHTML = '<span>暂停中...</span>';
+    hint.textContent = '';
+
+    fetch('/api/pause', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json', 'X-Trace-ID':traceId},
+        body: JSON.stringify({duration: duration})
+    })
+        .then(function(r) { return r.json().then(function(data) { return {ok:r.ok, status:r.status, data:data}; }); })
+        .then(function(res) {
+            btn.disabled = false;
+            btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg><span>暂停所有告警和扫描</span>';
+            if (!res.ok || !res.data.ok) {
+                var msg = (res.data && res.data.error) || ('HTTP ' + res.status);
+                hint.textContent = '暂停失败: ' + msg;
+                hint.style.color = 'var(--status-danger-text)';
+                clientAudit(traceId, '暂停告警与扫描', '失败',
+                    'HTTP ' + res.status + '，原因=' + msg);
+                return;
+            }
+            hint.textContent = '已暂停 ' + (res.data.pause && res.data.pause.duration_label ? res.data.pause.duration_label : label);
+            hint.style.color = 'var(--status-warning-text)';
+            clientAudit(traceId, '暂停告警与扫描', '成功',
+                '暂停到 ' + (res.data.pause ? res.data.pause.until : '-') +
+                '，剩余 ' + (res.data.pause ? res.data.pause.remaining_seconds : 0) + ' 秒');
+            renderPause(res.data.pause);
+        })
+        .catch(function(e) {
+            btn.disabled = false;
+            btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="6" y="4" width="4" height="16"/><rect x="14" y="4" width="4" height="16"/></svg><span>暂停所有告警和扫描</span>';
+            hint.textContent = '请求失败: ' + e.message;
+            hint.style.color = 'var(--status-danger-text)';
+            clientAudit(traceId, '暂停告警与扫描', '异常', '请求异常: ' + e.message);
+        });
+}
+
+function resumeAlertsAndScan() {
+    var traceId = makeTraceId();
+    var btn = document.getElementById('resume-btn');
+    var hint = document.getElementById('resume-hint');
+
+    clientAudit(traceId, '点击恢复按钮', '开始',
+        '当前暂停到 ' + (pauseState.until || '-') + '，准备调用 POST /api/resume');
+
+    btn.disabled = true;
+    btn.innerHTML = '<span>恢复中...</span>';
+    hint.textContent = '';
+
+    fetch('/api/resume', {
+        method: 'POST',
+        headers: {'Content-Type':'application/json', 'X-Trace-ID':traceId}
+    })
+        .then(function(r) { return r.json().then(function(data) { return {ok:r.ok, status:r.status, data:data}; }); })
+        .then(function(res) {
+            btn.disabled = false;
+            btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg><span>立即恢复</span>';
+            if (!res.ok || !res.data.ok) {
+                var msg = (res.data && res.data.error) || ('HTTP ' + res.status);
+                hint.textContent = '恢复失败: ' + msg;
+                hint.style.color = 'var(--status-danger-text)';
+                clientAudit(traceId, '恢复告警与扫描', '失败', 'HTTP ' + res.status + '，原因=' + msg);
+                return;
+            }
+            clientAudit(traceId, '恢复告警与扫描', '成功', '已取消暂停，采集与告警恢复');
+            renderPause(res.data.pause);
+            loadStatus();
+        })
+        .catch(function(e) {
+            btn.disabled = false;
+            btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="5 3 19 12 5 21 5 3"/></svg><span>立即恢复</span>';
+            hint.textContent = '请求失败: ' + e.message;
+            hint.style.color = 'var(--status-danger-text)';
+            clientAudit(traceId, '恢复告警与扫描', '异常', '请求异常: ' + e.message);
+        });
+}
+
+function computeAgeSeconds(serverNow, sinceText) {
+    if (!serverNow || !sinceText) return null;
+    var parse = function(s) {
+        var m = s.match(/^(\d{4})-(\d{2})-(\d{2})[ T](\d{2}):(\d{2}):(\d{2})/);
+        if (!m) return null;
+        return new Date(+m[1], +m[2]-1, +m[3], +m[4], +m[5], +m[6]).getTime();
+    };
+    var a = parse(serverNow), b = parse(sinceText);
+    if (a === null || b === null) return null;
+    return Math.max(0, Math.floor((a - b) / 1000));
+}
+
+function ageCell(d, ageSeconds) {
+    if (ageSeconds === null || ageSeconds === undefined) {
+        if (d.connected_seconds === null || d.connected_seconds === undefined) return '未知';
+        ageSeconds = d.connected_seconds;
+    }
+    return formatAge(ageSeconds);
+}
+
+function geoCell(value) {
+    var text = String(value || '').trim();
+    if (!text || text === '-') return '-';
+    return escapeHtml(text);
+}
+
+function formatAge(seconds) {
+    if (seconds === null || seconds === undefined) return '未知';
+    if (seconds < 60) return seconds + '秒';
+    if (seconds < 3600) return Math.floor(seconds / 60) + '分' + (seconds % 60) + '秒';
+    var h = Math.floor(seconds / 3600);
+    var m = Math.floor((seconds % 3600) / 60);
+    return h + '时' + m + '分';
+}
+
+function loadStatus() {
+    fetch('/api/status')
+        .then(function(r) { return r.json(); })
+        .then(function(data) {
+            if (!data.ok) return;
+            renderPause(data.pause);
+            renderServers(data);
+            renderResolvers(data.resolver_status);
+            renderDbStats(data.db_stats);
+            var newInterval = data.refresh_interval || 5;
+            if (newInterval !== AUTO_REFRESH_SEC) {
+                AUTO_REFRESH_SEC = newInterval;
+                if (refreshTimer) clearInterval(refreshTimer);
+                refreshTimer = setInterval(loadStatus, AUTO_REFRESH_SEC * 1000);
+            }
+            document.getElementById('refresh-indicator').textContent =
+                '(自动刷新，间隔 ' + AUTO_REFRESH_SEC + ' 秒)';
+        })
+        .catch(function(e) {
+            console.error('Status load error:', e);
+        });
+}
+
+function renderServers(data) {
+    var container = document.getElementById('server-status-area');
+    if (!data.servers || data.servers.length === 0) {
+        container.innerHTML = '<div class="card" style="text-align: center; color: var(--text-muted); padding: 40px 20px;"><p style="font-size:14px;">暂无采集数据，请点击「立即采集」按钮或等待定时采集。</p></div>';
+        return;
+    }
+
+    var html = '';
+    data.servers.forEach(function(rec) {
+        var statusClass = rec.status === 'success' ? 'badge-ok' : 'badge-err';
+        var statusText = rec.status === 'success' ? '正常' : '异常';
+
+        html += '<div class="card server-card">';
+        html += '<div class="server-header">';
+        html += '<span class="server-name">' + escapeHtml(rec.server) + '</span>';
+        html += '<span class="server-type">' + escapeHtml(rec.type) + '</span>';
+        html += '<span class="status-badge ' + statusClass + '">' + statusText + '</span>';
+        html += '<span class="scan-time"><svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><circle cx="12" cy="12" r="10"/><polyline points="12 6 12 12 16 14"/></svg> 采集时间: ' + escapeHtml(rec.scan_time) + '</span>';
+        html += '</div>';
+        html += '<div class="server-body">';
+        var isSshSrv = rec.type === 'ssh_login';
+        html += '<div class="info-row"><span class="info-label">' + (isSshSrv ? '当前在线终端:' : '在线客户端:') + '</span><span class="info-value" style="font-weight:700; color:var(--brand);">' + rec.online_count + '</span></div>';
+        html += '<div class="info-row"><span class="info-label">耗时:</span><span class="info-value">' + rec.duration_ms + 'ms</span></div>';
+
+        if (rec.error_message) {
+            html += '<div class="info-row error-text"><span class="info-label">错误:</span><span class="info-value" style="white-space:pre-wrap">' + escapeHtml(rec.error_message) + '</span></div>';
+        }
+
+        if (rec.client_details && rec.client_details.length > 0) {
+            var isSsh = rec.type === 'ssh_login';
+            html += '<div style="margin-top:14px;"><strong style="font-size:13.5px; color:var(--text-primary);">' + (isSsh ? '当前在线 SSH 连接:' : '客户端详情:') + '</strong>';
+            html += '<div class="table-responsive" style="margin-top:8px;"><table class="geo-table"><thead><tr>';
+            if (isSsh) {
+                html += '<th>用户</th>';
+                html += '<th>终端</th>';
+            }
+            html += '<th>IP 地址</th><th>' + (isSsh ? '时长' : '连接时长') + '</th><th>接入时间</th><th>城市</th><th>地区</th><th>国家</th><th>数据来源</th>';
+            html += '</tr></thead><tbody>';
+
+            rec.client_details.forEach(function(d) {
+                d._age_seconds = computeAgeSeconds(rec.server_now, d.connected_since);
+                var geo = (rec.geo_data && (rec.geo_data[d.ip] || rec.geo_data[String(d.ip || '').trim()])) || {};
+                html += '<tr>';
+                if (isSsh) {
+                    var userName = d.user || d.common_name || '-';
+                    var exclTag = d.excluded ? ' <span class="excl-tag" title="命中排除规则：仅记录，不发送告警">已排除</span>' : '';
+                    html += '<td><strong>' + escapeHtml(userName) + '</strong>' + exclTag + '</td>';
+                    html += '<td><code>' + escapeHtml(d.terminal || '-') + '</code></td>';
+                }
+                html += '<td><code>' + escapeHtml(d.ip) + '</code></td>';
+                html += '<td>' + ageCell(d, d._age_seconds) + '</td>';
+                html += '<td>' + escapeHtml(d.connected_since || '-') + '</td>';
+                html += '<td>' + geoCell(geo.city) + '</td>';
+                html += '<td>' + geoCell(geo.region) + '</td>';
+                html += '<td>' + geoCell(geo.country) + '</td>';
+                html += '<td>' + escapeHtml(geo.source || '-') + '</td>';
+                html += '</tr>';
+            });
+
+            html += '</tbody></table></div></div>';
+        }
+
+        html += '</div></div>';
+    });
+
+    container.innerHTML = html;
+}
+
+function renderResolvers(resolvers) {
+    var container = document.getElementById('resolver-status-area');
+    if (!resolvers || resolvers.length === 0) {
+        container.innerHTML = '<div class="card" style="text-align: center; color: var(--text-muted);"><p>无解析器</p></div>';
+        return;
+    }
+    var html = '';
+    resolvers.forEach(function(r) {
+        html += '<div class="card" style="margin-bottom:8px; padding:12px 18px; display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:10px;">';
+        html += '<div><strong style="font-size:14px;">' + escapeHtml(r.name) + '</strong> ';
+        if (r.available) {
+            html += '<span class="status-badge badge-ok" style="margin-left:8px;">可用</span>';
+            html += ' <span style="font-size:12px; color:var(--text-muted); margin-left:8px;">文件: <code>' + escapeHtml(r.file || '') + '</code></span>';
+        } else {
+            html += '<span class="status-badge badge-warn" style="margin-left:8px;">不可用</span>';
+            html += ' <span style="color:var(--status-warning-text); font-size:13px; margin-left:8px; white-space:pre-wrap">' + escapeHtml(r.error || '') + '</span>';
+        }
+        html += '</div></div>';
+    });
+    html += '<p style="font-size:12.5px; color:var(--text-muted); margin-top:8px;">提示：若需 IP 城市定位，请确保 <code>GeoLite2-City.mmdb</code> 文件存在于项目目录。</p>';
+    container.innerHTML = html;
+}
+
+function renderDbStats(stats) {
+    var container = document.getElementById('db-stats-area');
+    if (!stats) {
+        container.innerHTML = '<div class="card" style="text-align: center; color: var(--text-muted);"><p>无统计</p></div>';
+        return;
+    }
+    container.innerHTML = '<div class="card" style="padding:14px 18px; display:flex; gap:28px; flex-wrap:wrap; align-items:center;">' +
+        '<div>内部状态快照: <strong style="font-size:16px; color:var(--brand);">' + stats.scan_count + '</strong> 条</div>' +
+        '<div style="color:var(--border);">|</div>' +
+        '<div>事件日志: <strong style="font-size:16px; color:var(--brand);">' + stats.event_count + '</strong> 条</div>' +
+        '</div>';
+}
+
+function escapeHtml(str) {
+    if (!str) return '';
+    return String(str).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;').replace(/'/g, '&#39;');
+}
+
+function manualScan() {
+    var btn = document.getElementById('scan-btn');
+    var hint = document.getElementById('scan-hint');
+    var traceId = makeTraceId();
+    if (pauseState.paused) {
+        hint.textContent = '告警与扫描已暂停（剩余 ' + formatCountdown(pauseState.remaining_seconds) + '），请先「立即恢复」再采集。';
+        hint.style.color = 'var(--status-warning-text)';
+        clientAudit(traceId, '点击立即采集', '前端拦截',
+            '暂停中，未发起 /api/scan 请求，剩余 ' + pauseState.remaining_seconds + ' 秒');
+        return;
+    }
+    clientAudit(traceId, '点击立即采集', '开始', '准备调用 POST /api/scan');
+    scanInProgress = true;
+    btn.disabled = true;
+    btn.innerHTML = '<span>采集中...</span>';
+    hint.textContent = '';
+    fetch('/api/scan', {method: 'POST', headers:{'X-Trace-ID':traceId}})
+        .then(function(r) { return r.json().then(function(data) { return {ok:r.ok, status:r.status, data:data}; }); })
+        .then(function(res) {
+            scanInProgress = false;
+            btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg><span>立即采集</span>';
+            btn.disabled = pauseState.paused;
+            if (res.ok && res.data.ok) {
+                hint.textContent = '采集完成，正在刷新...';
+                hint.style.color = 'var(--status-success)';
+                clientAudit(traceId, '立即采集', '成功', '返回服务器数=' + ((res.data.results || []).length));
+                loadStatus();
+                setTimeout(function(){ hint.textContent = ''; }, 3000);
+            } else {
+                var msg = (res.data && res.data.error) || '未知错误';
+                hint.textContent = '采集失败: ' + msg;
+                hint.style.color = 'var(--status-danger-text)';
+                clientAudit(traceId, '立即采集', '失败', 'HTTP ' + res.status + '，原因=' + msg);
+                if (res.data && res.data.pause) {
+                    renderPause(res.data.pause);
+                }
+            }
+        })
+        .catch(function(e) {
+            scanInProgress = false;
+            btn.innerHTML = '<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21.5 2v6h-6M21.34 15.57a10 10 0 1 1-.57-8.38l5.67-5.67"/></svg><span>立即采集</span>';
+            btn.disabled = pauseState.paused;
+            hint.textContent = '请求失败: ' + e.message;
+            hint.style.color = 'var(--status-danger-text)';
+            clientAudit(traceId, '立即采集', '异常', '请求异常: ' + e.message);
+        });
+}
+
+// 页面加载时启动自动刷新
+loadStatus();
+refreshTimer = setInterval(loadStatus, AUTO_REFRESH_SEC * 1000);
+</script>
+
+{% endblock %}

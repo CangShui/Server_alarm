@@ -1,0 +1,20 @@
+version: "3.8"
+
+services:
+  vpn-alarm:
+    image: ghcr.io/cangshui/server_alarm:latest
+    container_name: vpn-alarm
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      - TZ=Asia/Shanghai
+    volumes:
+      # 挂载配置文件，用户可直接编辑或通过 Web 后台修改
+      - ./config.json:/app/config.json
+      # 持久化数据目录（数据库文件自动创建在其中），容器重启后数据不丢失
+      - ./data:/app/data
+      # 持久化日志文件，容器内写到 /app/logs，宿主机可直接查看
+      - ./logs:/app/logs
+      # 挂载 GeoLite2-City.mmdb 以启用城市级 IP 解析（随仓库分发，见 README 许可说明）
+      - ./GeoLite2-City.mmdb:/app/GeoLite2-City.mmdb
