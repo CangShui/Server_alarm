@@ -11,10 +11,6 @@
 | `ikev2` | strongSwan `ipsec statusall` 在线连接 | VPN 在线监控 |
 | `generic` | 通用 IP 提取 | 自定义命令 |
 
-> 注：项目名称已由「VPN 在线监控系统」更名为 **Server-Monitor**。
-> 仓库与镜像地址自 2026-09 起迁移为 `CangShui/server_alarm` / `ghcr.io/cangshui/server_alarm`；
-> 为不破坏既有部署，`docker-compose` 的服务名、容器名与数据库文件名
-> （`vpn-alarm` / `data/vpn_alarm.db`）保持不变。
 
 ## 部署方式 (Debian Docker Compose)
 
